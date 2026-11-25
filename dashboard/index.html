@@ -12,11 +12,13 @@
     <div class="mark" aria-hidden="true">◉</div>
     <div>
       <h1>Token Radar</h1>
-      <p class="sub">Every protocol that records no token, ranked by what its token would be worth.</p>
+      <p class="sub">Every protocol that records no token, ranked by what its token would be worth — with the peer rate behind each one and the expected value beside it.</p>
     </div>
   </div>
   <dl class="stats" id="stats"></dl>
 </header>
+
+<div class="strip" id="integrity" role="note"></div>
 
 <nav class="tabs" aria-label="Views">
   <button type="button" data-view="board" class="active" aria-current="page">Board</button>
@@ -37,9 +39,17 @@
         <option value="100000000">$100M+</option>
         <option value="500000000">$500M+</option>
       </select></label>
+      <label>Min peer rate <select id="minPeer">
+        <option value="0">Any rate</option>
+        <option value="0.25">25%+</option>
+        <option value="0.5">50%+</option>
+        <option value="0.75">75%+</option>
+      </select></label>
       <label class="check"><input id="watchlistOnly" type="checkbox"> Watchlist only</label>
       <label>Sort <select id="sort">
         <option value="implied">Implied value ↓</option>
+        <option value="expected">Expected value ↓</option>
+        <option value="peer">Peer rate ↓</option>
         <option value="tvl">TVL ↓</option>
         <option value="growth">7-day growth ↓</option>
         <option value="age">Age ↓</option>
@@ -53,16 +63,17 @@
           <th data-sort="rank" scope="col">#</th>
           <th data-sort="name" scope="col">Protocol</th>
           <th data-sort="category" scope="col">Category</th>
-          <th scope="col">Chains</th>
           <th data-sort="tvl" scope="col">TVL</th>
           <th data-sort="growth" scope="col">7d</th>
-          <th data-sort="age" scope="col">Age</th>
+          <th data-sort="peer" scope="col">Peer rate</th>
           <th data-sort="implied" scope="col">Implied value</th>
+          <th data-sort="expected" scope="col">Expected value</th>
+          <th scope="col">Value range</th>
         </tr></thead>
         <tbody id="rows"></tbody>
       </table>
     </div>
-    <p class="hint">Click a row for its detail view: the value breakdown, the comparables behind it, and the farm plan. ★ marks the 40 protocols on the snapshot’s watchlist.</p>
+    <p class="hint">Click a row for its detail view: the value breakdown, the peer rate behind it, the value range, and the farm plan with its verdict. ★ marks the 40 protocols on the snapshot’s watchlist. Peer rate is the share of protocols with the same category and age that record a token; expected value is implied value × peer rate.</p>
   </section>
 
   <section id="view-detail" class="view" hidden>
@@ -72,7 +83,12 @@
 
   <section id="view-live" class="view" hidden>
     <h2>Already trading — the market’s own values</h2>
-    <p class="lede">These protocols already have a token that trades, so the board never ranks them by a model. They are here as the comparables: their market cap divided by their TVL is the multiple each pre-token protocol is priced from. The 24 largest by market cap are shown.</p>
+    <p class="lede">These protocols already have a token that trades, so the board never ranks them by a model. They are here as the comparables: their market cap divided by their TVL is the multiple each pre-token protocol is priced from. Every live-token protocol in the snapshot is listed — use the search to find one, or sort by market cap.</p>
+    <div class="controls" role="search">
+      <label>Search <input id="liveQ" type="search" placeholder="Protocol name or slug…" autocomplete="off"></label>
+      <label>Category <select id="liveCategory"><option value="">All categories</option></select></label>
+    </div>
+    <p class="count" id="liveCount" aria-live="polite"></p>
     <div class="tablewrap">
       <table id="liveTable">
         <thead><tr>
@@ -91,7 +107,7 @@
 </main>
 
 <footer>
-  <p>Implied value is this entry’s own claim, never make.fun’s: what a token would be worth if the protocol’s record stayed as it is. It does not predict whether or when a token is issued. “Records no token” means the DefiLlama record carries no market cap, CoinGecko id or symbol — a record, never proof a protocol has no token.</p>
+  <p>Implied value is this entry’s own claim, never make.fun’s: what a token would be worth if the protocol’s record stayed as it is. It does not predict whether or when a token is issued. “Records no token” means the DefiLlama record carries no market cap, CoinGecko id or symbol — a record, never proof a protocol has none, and this board does not predict whether or when it issues one. The peer rate counts what the peers’ record shows; the expected value is implied value weighted by that rate.</p>
   <p id="source"></p>
 </footer>
 <script src="../data.js"></script>
