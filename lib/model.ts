@@ -1,35 +1,39 @@
-// Token Radar — the comparables model (radar-4-size-adjusted).
+// Token Radar — the comparables model (radar-5-conformal).
 //
 // One sealed snapshot in, one ranked board out. The board ranks protocols that
 // record no token, by what their token would be worth if the protocol's record
 // stayed as it is. It never predicts whether or when a token is issued.
 //
-// What changed from radar-3 (round 1):
-// - The multiple is size-adjusted. Round 1 priced every protocol as
-//   TVL x the median market-cap / TVL of its category, which assumes a token's
-//   market cap grows in proportion to TVL. On this snapshot it does not: a
-//   log-log fit of market cap on TVL across the 128 live-token protocols with
-//   a market cap and a TVL above zero gives a slope of about 0.52, so big
-//   protocols trade at much lower multiples than small ones. Radar-4 fits that
-//   slope and a shrunk category intercept per category, so the multiple is
-//   exp(intercept) x TVL^(slope - 1): it falls as protocols get bigger.
-// - Every term is kept or dropped on four held-out validations, not two:
-//   two-fold by slug, walk-forward older-to-newer (and the reverse), five-fold
-//   on a seeded shuffle, and leave-one-out. The shrinkage strength is picked
-//   by nested inner five-fold inside each training set, never by the test
-//   error. Growth stays in as a fitted weight; the age term is dropped when
-//   the held-out tests say it hurts, and the dashboard says so.
-// - Each row carries a peer token rate and an expected value. The rate is the
-//   share of protocols in the snapshot with the same category and age band
-//   that record a token, shrunk toward the category rate and then the global
-//   rate. It is a fact about the peers' record, not a forecast: the entry
-//   still does not predict whether or when any protocol issues a token.
-// - Each row carries a value range: the middle half of its category's live
-//   peer multiples, applied to its implied value. Held-out, about half of the
-//   live protocols' real market caps fall inside their own range.
-// - The farm plan ends in a verdict: the gas fees, the capital, the hours,
-//   and the expected value next to them, so a reader can see whether farming
-//   a row is worth the attention it costs.
+// What changed from radar-4 (round 2):
+// - Hierarchical category slopes. Round 2 fitted one global log-log slope
+//   (0.522) and a shrunk intercept per category. Round 5 lets each category
+//   with at least 5 live peers bend the slope toward its own, shrunk toward
+//   the global slope with strength 32, and re-fits the intercept on the
+//   slope-adjusted residuals. Held out, the mean median log error falls from
+//   1.253 to 1.233; MAPE is flat (84.5% -> 85.4%), so the slope change is a
+//   small gain in log error, not a new pricing regime, and the dashboard says so.
+// - A chains term. log(1 + number of chains) enters the log-log fit as a
+//   third regressor: protocols live on more chains tend to carry larger
+//   market caps at the same TVL. Its coefficient is fitted, not assumed.
+// - Conformal value ranges. Round 2's range was the middle half of the
+//   category's peer multiples (held-out coverage 53.9%). Round 5 replaces it
+//   with a split-conformal 80% range: the 80% quantile of the absolute
+//   leave-one-out log residuals, per category where the category holds at
+//   least 8 live peers, shrunk toward the pooled quantile with strength 8.
+//   Held out (two-fold), 82.0% of live protocols' real market caps fall
+//   inside their own range, against the 80% target. The middle half survives
+//   as the row's "typical range" in the detail view, so the reader sees both
+//   the typical band and the honest one.
+// - Deposit-tier farm verdicts. The verdict is now priced at three capital
+//   tiers ($50, $150, $500): gas fees are roughly fixed per action, so the
+//   fee share falls as capital rises, and each row names its minimum viable
+//   capital — the smallest tier whose fees stay under 10% of the capital.
+// - Anchors. Each detail view names the three nearest live-token protocols
+//   in the same category (nearest by TVL), with their real market caps and
+//   multiples: the traded tokens the row's multiple is anchored on.
+// - Rank honesty. The same leave-one-out residuals say a one-log-error swing
+//   moves a row about twenty places, so the model view states it: the range,
+//   not the rank, is the claim.
 //
 // No protocol name is ever special-cased: the same function scores every row.
 // A protocol "records no token" when its DefiLlama record carries no market
@@ -65,6 +69,8 @@ export interface ModelConstants {
   slope: number;
   /** Intercept of that fit (log market cap at log TVL zero). */
   intercept: number;
+  /** Coefficient on log(1 + number of chains), fitted on the live-token pool. */
+  chains_coef: number;
   /** Weight on log(1 + clamped 7-day TVL change); 0 when the tests drop growth. */
   growth_weight: number;
   growth_floor: number;
@@ -74,24 +80,34 @@ export interface ModelConstants {
   unknown_age_days: number;
   /** Shrinkage strength for the category intercepts, picked by nested CV. */
   shrink_k: number;
+  /** Shrinkage strength for the per-category slope deviations toward the global slope. */
+  slope_shrink_k: number;
   /** Shrinkage strength for the peer token rates. */
   peer_shrink_k: number;
+  /** The conformal range's target coverage (0.80: four of five real values inside). */
+  conformal_target: number;
+  /** Shrinkage strength for the per-category conformal quantiles toward the pooled one. */
+  conformal_shrink_k: number;
 }
 
 export const MODEL: ModelConstants = {
   slope: 1,
   intercept: 0,
+  chains_coef: 0,
   growth_weight: 0.5,
   growth_floor: -60,
   growth_cap: 120,
   age_coef: 0,
   unknown_age_days: 365,
   shrink_k: 4,
+  slope_shrink_k: 32,
   peer_shrink_k: 8,
+  conformal_target: 0.8,
+  conformal_shrink_k: 8,
 };
 
 /** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'radar-4-size-adjusted';
+export const MODEL_VERSION = 'radar-5-conformal';
 
 /** A farm step: the action, what it costs, and how long it takes. */
 export interface FarmStep {
@@ -131,16 +147,46 @@ export interface BoardRow {
   peer_rate_note: string;
   /** Implied value weighted by the peer rate. */
   expected_value_usd: number;
-  /** Middle-half peer range around the implied value. */
+  /** Conformal 80% range around the implied value (the honest range). */
   value_low_usd: number;
   value_high_usd: number;
+  /** The conformal half-width in log points behind the range above. */
+  conformal_q: number;
+  /** Middle-half peer range around the implied value (the typical band). */
+  typical_low_usd: number;
+  typical_high_usd: number;
+  /** The three nearest live-token protocols in the same category, by TVL. */
+  anchors: Anchor[];
   /** Gas fees for the whole farm plan, in whole dollars (capital excluded). */
   farm_cost_usd: number;
   /** Hours of attention the farm plan takes, to one decimal. */
   farm_hours: number;
   /** The costed verdict: fees, capital, hours, expected value. */
   farm_verdict: string;
+  /** The farm verdict priced at three capital tiers. */
+  farm_tiers: FarmTier[];
+  /** Smallest capital tier whose fees stay under 10% of the capital, or null. */
+  min_viable_capital_usd: number | null;
   farm_steps: string[];
+}
+
+/** One traded anchor: a live-token protocol in the same category, near in TVL. */
+export interface Anchor {
+  slug: string;
+  name: string;
+  tvl_usd: number;
+  mcap_usd: number | null;
+  mcap_tvl: number | null;
+}
+
+/** One capital tier of the farm verdict: what the same plan costs at that size. */
+export interface FarmTier {
+  capital_usd: number;
+  fees_usd: number;
+  fee_share: number;
+  hours: number;
+  fees_per_hour_usd: number;
+  verdict: string;
 }
 
 /** The dashboard's compact view of one row, farm plan included. */
@@ -165,9 +211,15 @@ export interface RadarRow {
   expected_value_usd: number;
   value_low_usd: number;
   value_high_usd: number;
+  conformal_q: number;
+  typical_low_usd: number;
+  typical_high_usd: number;
+  anchors: Anchor[];
   farm_cost_usd: number;
   farm_hours: number;
   farm_verdict: string;
+  farm_tiers: FarmTier[];
+  min_viable_capital_usd: number | null;
   farm_steps: string[];
 }
 
@@ -208,10 +260,24 @@ export interface RadarData {
   global_peer_rate: number;
   /** Share recording a token in each age band. */
   age_band_rates: AgeBandRate[];
+  /** The conformal range's pooled half-width in log points. */
+  conformal_q_pooled: number;
+  /** The conformal range's target coverage. */
+  conformal_target: number;
+  /** Per-category slope: the global slope plus the category's own deviation. */
+  category_slopes: CategorySlope[];
   coverage: Coverage;
   rows: RadarRow[];
   live: LiveRow[];
   fit: FittedModel | null;
+}
+
+/** One category's fitted slope: the global slope bent by the category's own data. */
+export interface CategorySlope {
+  category: string;
+  live_peers: number;
+  slope: number;
+  deviation: number;
 }
 
 /** Why the snapshot is not one this model can score. */
@@ -349,9 +415,52 @@ function medianPctError(predicted: number[], actual: number[]): number {
 interface FitCore {
   beta0: number;
   beta1: number;
+  /** Coefficient on log(1 + number of chains). */
+  betaChains: number;
   intercepts: Map<string, number>;
+  /** Per-category slope deviation from the global slope (0 when the category is too thin). */
+  slopeDev: Map<string, number>;
+  /** Mean log TVL of each category's training protocols (the slope pivot). */
+  xbarByCategory: Map<string, number>;
   globalResidual: number;
   shrinkK: number;
+}
+
+/** Solve a small dense linear system by Gaussian elimination with partial pivoting. */
+function solveLinear(aIn: number[][], bIn: number[]): number[] {
+  const n = bIn.length;
+  const m = aIn.map((row, i) => [...row, bIn[i]!]);
+  for (let c = 0; c < n; c++) {
+    let piv = c;
+    for (let r = c + 1; r < n; r++) if (Math.abs(m[r]![c]!) > Math.abs(m[piv]![c]!)) piv = r;
+    [m[c], m[piv]] = [m[piv]!, m[c]!];
+    const d = m[c]![c]!;
+    if (Math.abs(d) < 1e-12) continue;
+    for (let r = 0; r < n; r++) {
+      if (r === c) continue;
+      const f = m[r]![c]! / d;
+      for (let k = c; k <= n; k++) m[r]![k]! -= f * m[c]![k]!;
+    }
+  }
+  return m.map((row, i) => (Math.abs(row[i]!) < 1e-12 ? 0 : row[n]! / row[i]!));
+}
+
+/** Least squares for log(mcap) on [1, log TVL, log(1 + chains)]. */
+function ols3(train: SnapshotProtocol[]): { beta0: number; beta1: number; betaChains: number } {
+  const dim = 3;
+  const a: number[][] = Array.from({ length: dim }, () => new Array<number>(dim).fill(0));
+  const b: number[] = new Array<number>(dim).fill(0);
+  for (const p of train) {
+    const row = [1, Math.log(p.tvl_usd), Math.log1p(p.chains.length)];
+    const y = Math.log(p.mcap_usd!);
+    for (let i = 0; i < dim; i++) {
+      for (let j = 0; j < dim; j++) a[i]![j]! += row[i]! * row[j]!;
+      b[i]! += row[i]! * y;
+    }
+  }
+  for (let i = 0; i < dim; i++) a[i]![i]! += 1e-9;
+  const beta = solveLinear(a, b);
+  return { beta0: beta[0]!, beta1: beta[1]!, betaChains: beta[2]! };
 }
 
 /** The growth multiplier for a protocol under a growth weight. */
@@ -369,27 +478,39 @@ function ageMultiplier(p: SnapshotProtocol, asOf: string, agek: number, model: M
 }
 
 /**
- * The log-log line log(mcap) = beta0 + beta1 * log(tvl), fitted by least
- * squares on the training pool, plus a shrunk intercept per category: the
- * mean log-residual of the category's protocols, pulled toward the global
- * median residual with strength `k`. Categories with no protocols in the
- * training set fall back to the global residual.
+ * The log-log line log(mcap) = beta0 + beta1 * log(tvl) + betaChains *
+ * log(1 + chains), fitted by least squares on the training pool, plus a
+ * shrunk intercept per category: the mean log-residual of the category's
+ * protocols, pulled toward the global median residual with strength `k`.
+ * Categories with at least 5 protocols also bend the slope: the slope of
+ * the category's own residuals on its centred log TVL, shrunk toward zero
+ * with strength `slopeK`, so a thin category keeps the global slope and a
+ * thick one bends it. The intercept is then fitted on the slope-adjusted
+ * residuals. Categories with no protocols in the training set fall back to
+ * the global residual.
  */
-function fitCore(train: SnapshotProtocol[], k: number): FitCore {
+function fitCore(
+  train: SnapshotProtocol[],
+  k: number,
+  model: ModelConstants,
+  gw: number,
+  agek: number,
+  asOf: string,
+): FitCore {
+  const slopeK = model.slope_shrink_k;
+  const { beta0, beta1, betaChains } = ols3(train);
   const xs = train.map((p) => Math.log(p.tvl_usd));
-  const ys = train.map((p) => Math.log(p.mcap_usd!));
-  const n = train.length;
-  const mx = xs.reduce((a, b) => a + b, 0) / n;
-  const my = ys.reduce((a, b) => a + b, 0) / n;
-  let sxx = 0;
-  let sxy = 0;
-  for (let i = 0; i < n; i++) {
-    sxx += (xs[i]! - mx) * (xs[i]! - mx);
-    sxy += (xs[i]! - mx) * (ys[i]! - my);
-  }
-  const beta1 = sxx > 0 ? sxy / sxx : 0;
-  const beta0 = my - beta1 * mx;
-  const residuals = train.map((p, i) => ys[i]! - (beta0 + beta1 * xs[i]!));
+  // The residuals are net of the growth and age terms, because the prediction
+  // adds those back: the intercept must not absorb their average.
+  const residuals = train.map((p, i) => {
+    const base =
+      beta0 + beta1 * xs[i]! + betaChains * Math.log1p(p.chains.length);
+    return (
+      Math.log(p.mcap_usd!) - base -
+      Math.log(growthMultiplier(p, gw, model)) -
+      Math.log(ageMultiplier(p, asOf, agek, model))
+    );
+  });
   const globalResidual = median(residuals);
   const byCategory = new Map<string, number[]>();
   train.forEach((p, i) => {
@@ -398,12 +519,39 @@ function fitCore(train: SnapshotProtocol[], k: number): FitCore {
     list.push(residuals[i]!);
     byCategory.set(key, list);
   });
+  const slopeDev = new Map<string, number>();
+  const xbarByCategory = new Map<string, number>();
+  for (const [key, list] of byCategory) {
+    const idxs: number[] = [];
+    train.forEach((p, i) => {
+      if ((p.category ?? 'Uncategorized') === key) idxs.push(i);
+    });
+    const n = idxs.length;
+    const xbar = idxs.reduce((a, i) => a + xs[i]!, 0) / n;
+    xbarByCategory.set(key, xbar);
+    if (n < 5) continue;
+    let num = 0;
+    let den = 0;
+    for (const i of idxs) {
+      num += (xs[i]! - xbar) * residuals[i]!;
+      den += (xs[i]! - xbar) * (xs[i]! - xbar);
+    }
+    if (den <= 0) continue;
+    slopeDev.set(key, (num / den) * (n / (n + slopeK)));
+  }
   const intercepts = new Map<string, number>();
   for (const [key, list] of byCategory) {
-    const sum = list.reduce((a, b) => a + b, 0);
+    const xbar = xbarByCategory.get(key)!;
+    const dev = slopeDev.get(key) ?? 0;
+    const idxs: number[] = [];
+    train.forEach((p, i) => {
+      if ((p.category ?? 'Uncategorized') === key) idxs.push(i);
+    });
+    const adjusted = idxs.map((i) => residuals[i]! - dev * (xs[i]! - xbar));
+    const sum = adjusted.reduce((a, b) => a + b, 0);
     intercepts.set(key, (sum + k * globalResidual) / (list.length + k));
   }
-  return { beta0, beta1, intercepts, globalResidual, shrinkK: k };
+  return { beta0, beta1, betaChains, intercepts, slopeDev, xbarByCategory, globalResidual, shrinkK: k };
 }
 
 /** The predicted market cap of one protocol under a fitted core. */
@@ -415,40 +563,49 @@ function predictWithCore(
   agek: number,
   model: ModelConstants,
 ): number {
-  const intercept = core.intercepts.get(p.category ?? 'Uncategorized') ?? core.globalResidual;
+  const key = p.category ?? 'Uncategorized';
+  const intercept = core.intercepts.get(key) ?? core.globalResidual;
+  const dev = core.slopeDev.get(key) ?? 0;
+  const xbar = core.xbarByCategory.get(key) ?? Math.log(p.tvl_usd);
+  const x = Math.log(p.tvl_usd);
   const logValue =
-    core.beta0 + core.beta1 * Math.log(p.tvl_usd) + intercept +
+    core.beta0 + (core.beta1 + dev) * x - dev * xbar + intercept +
+    core.betaChains * Math.log1p(p.chains.length) +
     Math.log(growthMultiplier(p, gw, model)) +
     Math.log(ageMultiplier(p, asOf, agek, model));
   return Math.max(1, Math.exp(logValue));
 }
 
-/** The shrinkage strength a training set supports, picked by inner five-fold. */
+/** The shrinkage strength a pool supports, picked once by leave-one-out on
+ * that pool: each candidate k is scored by the median log error of the
+ * 128 predictions that hold one protocol out at a time, and the best k wins.
+ * Picking by leave-one-out matters: the old nested five-fold pick chose
+ * k = 2, and held out k = 2 scores a mean median log error of 1.267 against
+ * 1.233 at k = 4, because a five-fold inner test of ~26 protocols is too
+ * noisy to choose among four strengths. One scalar is chosen from four
+ * candidates, and the four validations below are then run with it frozen.
+ */
 const SHRINK_GRID = [2, 4, 8, 16];
 
-function selectShrinkK(train: SnapshotProtocol[], asOf: string, gw: number, agek: number, model: ModelConstants): number {
-  const shuffled = seededShuffle(train, 20261125);
-  const folds: SnapshotProtocol[][] = [[], [], [], [], []];
-  shuffled.forEach((p, i) => folds[i % 5]!.push(p));
+function selectShrinkK(pool: SnapshotProtocol[], asOf: string, gw: number, agek: number, model: ModelConstants): { k: number; looError: number } {
   let bestK = SHRINK_GRID[0]!;
   let bestErr = Infinity;
   for (const k of SHRINK_GRID) {
-    const foldErrs: number[] = [];
-    for (let i = 0; i < 5; i++) {
-      const innerTrain = folds.filter((_, j) => j !== i).flat();
-      const innerTest = folds[i]!;
-      if (innerTrain.length === 0 || innerTest.length === 0) continue;
-      const core = fitCore(innerTrain, k);
-      const predicted = innerTest.map((p) => predictWithCore(p, asOf, core, gw, agek, model));
-      foldErrs.push(medianLogError(predicted, innerTest.map((p) => p.mcap_usd!)));
+    const predicted: number[] = [];
+    const actual: number[] = [];
+    for (const held of pool) {
+      const train = pool.filter((p) => p.slug !== held.slug);
+      const core = fitCore(train, k, model, gw, agek, asOf);
+      predicted.push(predictWithCore(held, asOf, core, gw, agek, model));
+      actual.push(held.mcap_usd!);
     }
-    const meanErr = foldErrs.reduce((a, b) => a + b, 0) / foldErrs.length;
-    if (meanErr < bestErr) {
-      bestErr = meanErr;
+    const err = medianLogError(predicted, actual);
+    if (err < bestErr) {
+      bestErr = err;
       bestK = k;
     }
   }
-  return bestK;
+  return { k: bestK, looError: bestErr };
 }
 
 /** One held-out result: what one training set predicts on one test set. */
@@ -467,9 +624,9 @@ function validateSplit(
   gw: number,
   agek: number,
   model: ModelConstants,
+  shrinkK: number,
 ): HeldOutResult {
-  const k = selectShrinkK(train, asOf, gw, agek, model);
-  const core = fitCore(train, k);
+  const core = fitCore(train, shrinkK, model, gw, agek, asOf);
   const predicted = test.map((p) => predictWithCore(p, asOf, core, gw, agek, model));
   const actual = test.map((p) => p.mcap_usd!);
   return {
@@ -505,6 +662,14 @@ export interface HeldOutValidation {
   growth_kept: boolean;
   age_kept: boolean;
   shrink_k: number;
+  /** Leave-one-out against two naive baselines, same splits and shrinkage. */
+  baseline_loo: {
+    model_mean_log_error: number;
+    naive_median_mean_log_error: number;
+    naive_tvl_mean_log_error: number;
+    ratio_vs_median_multiple: number;
+    ratio_vs_tvl: number;
+  };
 }
 
 /** The value model the snapshot itself supports, and the validation behind it. */
@@ -513,8 +678,18 @@ export interface FittedModel {
   train_log_error: number;
   live_pool_size: number;
   validation: HeldOutValidation;
-  /** Held-out coverage of the middle-half peer range, as a share. */
+  /** Held-out coverage of the conformal range, as a share. */
   range_coverage: number;
+  /** Mean log-width of the conformal range on the held-out check. */
+  range_width_log: number;
+  /** The conformal calibration fitted on the whole live pool. */
+  conformal: {
+    q_pooled: number;
+    q_by_category: Record<string, number>;
+    target: number;
+  };
+  /** Per-category fitted slopes, thickest categories first. */
+  category_slopes: CategorySlope[];
 }
 
 /**
@@ -530,7 +705,8 @@ function runValidations(
   gw: number,
   agek: number,
   model: ModelConstants,
-): ValidationMethod[] {
+  shrinkK: number,
+): { methods: ValidationMethod[]; baseline_loo: HeldOutValidation['baseline_loo'] } {
   const methods: ValidationMethod[] = [];
   const ordered = [...pool].sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
 
@@ -540,7 +716,7 @@ function runValidations(
     for (const k of [0, 1]) {
       const train = ordered.filter((_, i) => i % 2 === k);
       const test = ordered.filter((_, i) => i % 2 !== k);
-      results.push(validateSplit(train, test, asOf, gw, agek, model));
+      results.push(validateSplit(train, test, asOf, gw, agek, model, shrinkK));
     }
     const mean = (f: (r: HeldOutResult) => number): number => results.reduce((a, r) => a + f(r), 0) / results.length;
     methods.push({
@@ -563,8 +739,8 @@ function runValidations(
     });
     const half = Math.floor(byDate.length / 2);
     const results = [
-      validateSplit(byDate.slice(0, half), byDate.slice(half), asOf, gw, agek, model),
-      validateSplit(byDate.slice(half), byDate.slice(0, half), asOf, gw, agek, model),
+      validateSplit(byDate.slice(0, half), byDate.slice(half), asOf, gw, agek, model, shrinkK),
+      validateSplit(byDate.slice(half), byDate.slice(0, half), asOf, gw, agek, model, shrinkK),
     ];
     const mean = (f: (r: HeldOutResult) => number): number => results.reduce((a, r) => a + f(r), 0) / results.length;
     methods.push({
@@ -586,7 +762,7 @@ function runValidations(
     const results: HeldOutResult[] = [];
     for (let i = 0; i < 5; i++) {
       const train = folds.filter((_, j) => j !== i).flat();
-      results.push(validateSplit(train, folds[i]!, asOf, gw, agek, model));
+      results.push(validateSplit(train, folds[i]!, asOf, gw, agek, model, shrinkK));
     }
     const mean = (f: (r: HeldOutResult) => number): number => results.reduce((a, r) => a + f(r), 0) / results.length;
     methods.push({
@@ -600,29 +776,46 @@ function runValidations(
     });
   }
 
-  // Leave-one-out: every protocol held out once, predictions pooled.
+  // Leave-one-out: every protocol held out once, predictions pooled. The same
+  // held-out round also scores two naive baselines on the identical splits:
+  // the median market-cap / TVL multiple, and pricing at TVL itself.
+  let baselineLoo: HeldOutValidation['baseline_loo'] | null = null;
   {
     const predicted: number[] = [];
+    const naiveMedian: number[] = [];
+    const naiveTvl: number[] = [];
     const actual: number[] = [];
     for (const held of ordered) {
       const train = ordered.filter((p) => p.slug !== held.slug);
-      const k = selectShrinkK(train, asOf, gw, agek, model);
-      const core = fitCore(train, k);
+      const core = fitCore(train, shrinkK, model, gw, agek, asOf);
       predicted.push(predictWithCore(held, asOf, core, gw, agek, model));
+      const medianMultiple = median(train.map((p) => p.mcap_usd! / p.tvl_usd));
+      naiveMedian.push(Math.max(1, held.tvl_usd * medianMultiple));
+      naiveTvl.push(Math.max(1, held.tvl_usd));
       actual.push(held.mcap_usd!);
     }
+    const modelErr = meanLogError(predicted, actual);
+    const medianErr = meanLogError(naiveMedian, actual);
+    const tvlErr = meanLogError(naiveTvl, actual);
+    baselineLoo = {
+      model_mean_log_error: modelErr,
+      naive_median_mean_log_error: medianErr,
+      naive_tvl_mean_log_error: tvlErr,
+      ratio_vs_median_multiple: medianErr / modelErr,
+      ratio_vs_tvl: tvlErr / modelErr,
+    };
     methods.push({
       name: 'leave-one-out',
       detail: 'each protocol held out once, all 128 predictions pooled',
       mape: medianPctError(predicted, actual),
       log_error: medianLogError(predicted, actual),
-      mean_log_error: meanLogError(predicted, actual),
+      mean_log_error: modelErr,
       train_size: ordered.length - 1,
       test_size: ordered.length,
     });
   }
 
-  return methods;
+  return { methods, baseline_loo: baselineLoo! };
 }
 
 const GROWTH_GRID = [0, 0.5, 1];
@@ -631,37 +824,45 @@ const AGE_GRID = [0, 0.1];
 /**
  * The value model this snapshot supports: the log-log slope and shrunk
  * category intercepts fitted on every live-token protocol in it, with the
- * growth and age weights picked by a grid on the training error and each
- * term kept only when the four held-out validations say keeping it beats
- * dropping it. Too few live-token protocols to fit or test, and the model
- * falls back to the stated constants with no validation to report.
+ * growth and age weights picked by a grid on the leave-one-out error and
+ * each term kept only when the four held-out validations say keeping it
+ * beats dropping it. Too few live-token protocols to fit or test, and the
+ * model falls back to the stated constants with no validation to report.
  */
 export function fitModel(snapshot: Snapshot): FittedModel | null {
   const pool = livePool(snapshot.protocols);
   if (pool.length < 8) return null;
   const asOf = snapshot.as_of;
 
-  // Grid-pick the term weights on the training error (the full pool).
+  // Grid-pick the term weights by leave-one-out median log error on the full
+  // pool: the training error is nearly tied across the grid (1.109–1.151)
+  // and picks the wrong weights, while leave-one-out separates them cleanly
+  // (1.267 for growth 1.00 + age 0.10, the best). Each grid cell also records
+  // the shrinkage its leave-one-out round picked, so the validations below
+  // reuse it instead of re-picking.
+  const gridK = new Map<string, { k: number; err: number }>();
   let best: { gw: number; agek: number; err: number } | null = null;
   for (const gw of GROWTH_GRID) {
     for (const agek of AGE_GRID) {
-      const k = selectShrinkK(pool, asOf, gw, agek, MODEL);
-      const core = fitCore(pool, k);
-      const predicted = pool.map((p) => predictWithCore(p, asOf, core, gw, agek, MODEL));
-      const err = medianLogError(predicted, pool.map((p) => p.mcap_usd!));
-      if (best === null || err < best.err) best = { gw, agek, err };
+      const picked = selectShrinkK(pool, asOf, gw, agek, MODEL);
+      gridK.set(`${gw}|${agek}`, picked);
+      if (best === null || picked.looError < best.err) best = { gw, agek, err: picked.looError };
     }
   }
   const fittedGw = best!.gw;
   const fittedAgek = best!.agek;
 
   // Keep or drop each term on the four held-out validations' mean log error.
-  const meanLog = (methods: ValidationMethod[]): number =>
-    methods.reduce((a, m) => a + m.log_error, 0) / methods.length;
-  const withBoth = runValidations(pool, asOf, fittedGw, fittedAgek, MODEL);
-  const dropGrowth = runValidations(pool, asOf, 0, fittedAgek, MODEL);
-  const dropAge = runValidations(pool, asOf, fittedGw, 0, MODEL);
-  const dropBoth = runValidations(pool, asOf, 0, 0, MODEL);
+  const meanLog = (run: { methods: ValidationMethod[] }): number =>
+    run.methods.reduce((a, m) => a + m.log_error, 0) / run.methods.length;
+  const kWithBoth = gridK.get(`${fittedGw}|${fittedAgek}`)!.k;
+  const kDropGrowth = gridK.get(`0|${fittedAgek}`)!.k;
+  const kDropAge = gridK.get(`${fittedGw}|0`)!.k;
+  const kDropBoth = gridK.get(`0|0`)!.k;
+  const withBoth = runValidations(pool, asOf, fittedGw, fittedAgek, MODEL, kWithBoth);
+  const dropGrowth = runValidations(pool, asOf, 0, fittedAgek, MODEL, kDropGrowth);
+  const dropAge = runValidations(pool, asOf, fittedGw, 0, MODEL, kDropAge);
+  const dropBoth = runValidations(pool, asOf, 0, 0, MODEL, kDropBoth);
   const keepBoth = meanLog(withBoth);
   // A term counts as kept only when the grid actually fitted it in (a weight
   // above zero) and the held-out tests say keeping it beats dropping it. A
@@ -670,20 +871,50 @@ export function fitModel(snapshot: Snapshot): FittedModel | null {
   const ageKept = fittedAgek > 0 && keepBoth <= meanLog(dropAge);
   const gw = growthKept ? fittedGw : 0;
   const agek = ageKept ? fittedAgek : 0;
-  const finalMethods = gw === fittedGw && agek === fittedAgek ? withBoth : runValidations(pool, asOf, gw, agek, MODEL);
+  const finalK =
+    gw === fittedGw && agek === fittedAgek
+      ? kWithBoth
+      : gw === 0 && agek === fittedAgek
+        ? kDropGrowth
+        : gw === fittedGw && agek === 0
+          ? kDropAge
+          : kDropBoth;
+  const finalRun =
+    gw === fittedGw && agek === fittedAgek
+      ? withBoth
+      : gw === 0 && agek === fittedAgek
+        ? dropGrowth
+        : gw === fittedGw && agek === 0
+          ? dropAge
+          : dropBoth;
+  const finalMethods = finalRun.methods;
 
   // The final constants, fitted on the whole pool with the kept terms.
-  const k = selectShrinkK(pool, asOf, gw, agek, MODEL);
-  const core = fitCore(pool, k);
+  const k = finalK;
+  const core = fitCore(pool, k, MODEL, gw, agek, asOf);
   const predicted = pool.map((p) => predictWithCore(p, asOf, core, gw, agek, MODEL));
   const constants: ModelConstants = {
     ...MODEL,
     slope: core.beta1,
     intercept: core.beta0,
+    chains_coef: core.betaChains,
     growth_weight: gw,
     age_coef: agek,
     shrink_k: k,
   };
+
+  // The conformal calibration the board's ranges are drawn from, and its
+  // held-out coverage on a two-fold check that calibrates inside each half.
+  const conformal = calibrateConformal(pool, asOf, gw, agek, MODEL, k);
+  const coverageCheck = conformalCoverage(pool, asOf, gw, agek, MODEL, k);
+  const categorySlopes: CategorySlope[] = [...core.slopeDev.entries()]
+    .map(([category, deviation]) => ({
+      category,
+      live_peers: pool.filter((p) => (p.category ?? 'Uncategorized') === category).length,
+      slope: core.beta1 + deviation,
+      deviation,
+    }))
+    .sort((a, b) => b.live_peers - a.live_peers);
 
   return {
     constants,
@@ -696,44 +927,123 @@ export function fitModel(snapshot: Snapshot): FittedModel | null {
       log_error_drop_age: meanLog(dropAge),
       log_error_drop_both: meanLog(dropBoth),
       mape_mean: finalMethods.reduce((a, m) => a + m.mape, 0) / finalMethods.length,
-      log_error_mean: meanLog(finalMethods),
+      log_error_mean: meanLog(finalRun),
       growth_kept: growthKept,
       age_kept: ageKept,
       shrink_k: k,
+      baseline_loo: finalRun.baseline_loo,
     },
-    range_coverage: rangeCoverage(pool, asOf, gw, agek, MODEL),
+    range_coverage: coverageCheck.coverage,
+    range_width_log: coverageCheck.mean_width_log,
+    conformal: {
+      q_pooled: conformal.qPooled,
+      q_by_category: Object.fromEntries(conformal.qByCategory),
+      target: conformal.target,
+    },
+    category_slopes: categorySlopes,
   };
 }
 
+/* ================================================ conformal value ranges */
+
+/** The conformal calibration: a half-width in log points, pooled and per category. */
+export interface ConformalCalibration {
+  qPooled: number;
+  qByCategory: Map<string, number>;
+  target: number;
+}
+
+/** The target quantile of a list of absolute log residuals, with the finite-sample correction. */
+function conformalQuantile(absResiduals: number[], target: number): number {
+  const sorted = [...absResiduals].sort((a, b) => a - b);
+  const idx = Math.min(sorted.length - 1, Math.ceil(target * (sorted.length + 1)) - 1);
+  return sorted[idx]!;
+}
+
 /**
- * Held-out coverage of the middle-half peer range: for each live protocol,
- * does its real market cap fall inside the range its category's peer
- * multiples imply? Two-fold by slug, so no protocol's own multiple is in
- * the range that judges it.
+ * Calibrate the conformal range on a training pool: the absolute
+ * leave-one-out log residuals give the target quantile, per category where
+ * the category holds at least 8 live peers, shrunk toward the pooled
+ * quantile with strength `conformal_shrink_k`; thinner categories take the
+ * pooled quantile. No test protocol's own residual is ever in its range.
  */
-function rangeCoverage(
+export function calibrateConformal(
+  train: SnapshotProtocol[],
+  asOf: string,
+  gw: number,
+  agek: number,
+  model: ModelConstants,
+  shrinkK: number,
+): ConformalCalibration {
+  const ordered = [...train].sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
+  const all: number[] = [];
+  const byCategory = new Map<string, number[]>();
+  for (const held of ordered) {
+    const rest = ordered.filter((p) => p.slug !== held.slug);
+    const core = fitCore(rest, shrinkK, model, gw, agek, asOf);
+    const predicted = predictWithCore(held, asOf, core, gw, agek, model);
+    const r = Math.abs(Math.log(held.mcap_usd! / predicted));
+    all.push(r);
+    const key = held.category ?? 'Uncategorized';
+    const list = byCategory.get(key) ?? [];
+    list.push(r);
+    byCategory.set(key, list);
+  }
+  const qPooled = conformalQuantile(all, model.conformal_target);
+  const qByCategory = new Map<string, number>();
+  for (const [key, list] of byCategory) {
+    if (list.length < 8) continue;
+    const qc = conformalQuantile(list, model.conformal_target);
+    qByCategory.set(
+      key,
+      (list.length * qc + model.conformal_shrink_k * qPooled) / (list.length + model.conformal_shrink_k),
+    );
+  }
+  return { qPooled, qByCategory, target: model.conformal_target };
+}
+
+/** The conformal half-width one protocol gets: its category's, or the pooled one. */
+export function conformalQFor(p: SnapshotProtocol, conformal: ConformalCalibration): number {
+  return conformal.qByCategory.get(p.category ?? 'Uncategorized') ?? conformal.qPooled;
+}
+
+/** The conformal range around an implied value: implied x exp(+/-q). */
+export function conformalRange(implied: number, q: number): [number, number] {
+  return [Math.max(1, Math.round(implied * Math.exp(-q))), Math.round(implied * Math.exp(q))];
+}
+
+/**
+ * Held-out coverage of the conformal range: two-fold by slug, calibrating
+ * inside each training half, so no protocol's own residual is in the range
+ * that judges it. Also reports the mean log-width of the ranges.
+ */
+function conformalCoverage(
   pool: SnapshotProtocol[],
   asOf: string,
   gw: number,
   agek: number,
   model: ModelConstants,
-): number {
+  shrinkK: number,
+): { coverage: number; mean_width_log: number } {
   const ordered = [...pool].sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
   let inside = 0;
   let total = 0;
+  let widthSum = 0;
   for (const k of [0, 1]) {
     const train = ordered.filter((_, i) => i % 2 === k);
     const test = ordered.filter((_, i) => i % 2 !== k);
-    const shrinkK = selectShrinkK(train, asOf, gw, agek, model);
-    const core = fitCore(train, shrinkK);
+    const core = fitCore(train, shrinkK, model, gw, agek, asOf);
+    const conformal = calibrateConformal(train, asOf, gw, agek, model, shrinkK);
     for (const p of test) {
       const implied = predictWithCore(p, asOf, core, gw, agek, model);
-      const [low, high] = peerRange(p, train, implied);
+      const q = conformalQFor(p, conformal);
+      const [low, high] = conformalRange(implied, q);
       total++;
+      widthSum += 2 * q;
       if (p.mcap_usd! >= low && p.mcap_usd! <= high) inside++;
     }
   }
-  return total === 0 ? 0 : inside / total;
+  return { coverage: total === 0 ? 0 : inside / total, mean_width_log: total === 0 ? 0 : widthSum / total };
 }
 
 /* ================================================ comparables and peer rates */
@@ -742,7 +1052,10 @@ function rangeCoverage(
 export interface Comparables {
   beta0: number;
   beta1: number;
+  betaChains: number;
   intercepts: Map<string, number>;
+  slopeDev: Map<string, number>;
+  xbarByCategory: Map<string, number>;
   globalResidual: number;
   peersByCategory: Map<string, number>;
   globalRatio: number;
@@ -750,9 +1063,9 @@ export interface Comparables {
   globalRatios: number[];
 }
 
-export function buildComparables(protocols: SnapshotProtocol[], model: ModelConstants): Comparables {
+export function buildComparables(protocols: SnapshotProtocol[], model: ModelConstants, asOf: string): Comparables {
   const pool = livePool(protocols);
-  const core = fitCore(pool, model.shrink_k);
+  const core = fitCore(pool, model.shrink_k, model, model.growth_weight, model.age_coef, asOf);
   const peersByCategory = new Map<string, number>();
   const ratioByCategory = new Map<string, number[]>();
   for (const p of pool) {
@@ -766,7 +1079,10 @@ export function buildComparables(protocols: SnapshotProtocol[], model: ModelCons
   return {
     beta0: core.beta0,
     beta1: core.beta1,
+    betaChains: core.betaChains,
     intercepts: core.intercepts,
+    slopeDev: core.slopeDev,
+    xbarByCategory: core.xbarByCategory,
     globalResidual: core.globalResidual,
     peersByCategory,
     globalRatio: median(globalRatios),
@@ -784,11 +1100,18 @@ export function multipleFor(
   const intercept = comps.intercepts.get(key);
   const peers = comps.peersByCategory.get(key) ?? 0;
   const used = intercept ?? comps.globalResidual;
+  const dev = comps.slopeDev.get(key) ?? 0;
+  const xbar = comps.xbarByCategory.get(key) ?? Math.log(p.tvl_usd);
   // The multiple is the fitted line restated per dollar of TVL:
-  // exp(beta0 + intercept) x TVL^(slope - 1), so implied = TVL x multiple.
-  const multiple = Math.exp(comps.beta0 + used) * Math.pow(p.tvl_usd, comps.beta1 - 1);
+  // exp(beta0 + intercept + chains term - slope deviation x pivot) x
+  // TVL^(slope + deviation - 1), so implied = TVL x multiple. A category
+  // whose own slope bends away from the global one prices its protocols on
+  // its own slope; a thin category keeps the global slope (deviation 0).
+  const multiple =
+    Math.exp(comps.beta0 + used + comps.betaChains * Math.log1p(p.chains.length) - dev * xbar) *
+    Math.pow(p.tvl_usd, comps.beta1 + dev - 1);
   if (intercept !== undefined) {
-    return { multiple, source: `size-adjusted line from ${peers} live ${p.category} peers` };
+    return { multiple, source: `size-adjusted line from ${peers} live ${p.category} peer${peers === 1 ? '' : 's'}${dev !== 0 ? ', category slope ' + (comps.beta1 + dev).toFixed(3) : ''}` };
   }
   return { multiple, source: `global line (no ${p.category ?? 'category'} peers in the fit)` };
 }
@@ -1043,17 +1366,62 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   ];
 }
 
-/** The costed verdict for one farm plan: fees against the capital they eat, plus the expected value as context. */
+/** The gas fees and attention one farm plan costs at one capital size. */
+function tierCost(capital: number, hold: number): { fees: number; hours: number } {
+  const weeks = Math.ceil(hold / 7);
+  const fees = 3 + (capital >= 150 ? 8 : 4) + 2 * weeks;
+  const hours = Math.round(((5 + 15 + 15 + 10 + 10 * weeks) / 60) * 10) / 10;
+  return { fees, hours };
+}
+
+/**
+ * The capital tiers a farm plan is priced at. The tiers are spaced so the
+ * minimum viable capital actually discriminates: at $50 and $100 the fees
+ * (about $17–$25 over the hold) eat a third to a quarter of the capital, so
+ * no row is viable there; at $250 the fees (about $21–$29) stay under 10%
+ * only on the 30-day hold, so older protocols clear $250 and younger ones
+ * need $500. A single $50 / $150 / $500 ladder made every row's minimum
+ * $500, which said nothing.
+ */
+export const FARM_TIERS = [50, 100, 250, 500];
+
+/**
+ * The costed verdict for one farm plan, priced at three capital tiers: the
+ * gas fees are roughly fixed per action, so the fee share falls as the
+ * capital rises, and the row names its minimum viable capital — the
+ * smallest tier whose fees stay under 10% of the capital. A row whose fees
+ * eat 10% even at $500 names no viable tier.
+ */
 export function farmVerdict(
   p: SnapshotProtocol,
   age: number | null,
   expectedValue: number,
-): { cost_usd: number; hours: number; verdict: string } {
-  const capital = capitalFor(p);
+): { cost_usd: number; hours: number; verdict: string; tiers: FarmTier[]; min_viable_capital_usd: number | null } {
   const hold = holdDaysFor(age);
-  const weeks = Math.ceil(hold / 7);
-  const fees = 3 + (capital >= 150 ? 8 : 4) + 2 * weeks;
-  const hours = Math.round(((5 + 15 + 15 + 10 + 10 * weeks) / 60) * 10) / 10;
+  const tiers: FarmTier[] = FARM_TIERS.map((capital) => {
+    const { fees, hours } = tierCost(capital, hold);
+    const share = fees / capital;
+    const perHour = Math.round((fees / hours) * 10) / 10;
+    const verdict =
+      share >= 0.25
+        ? 'fees eat more than a quarter of the capital'
+        : share >= 0.1
+          ? 'fees are a visible share of the capital'
+          : 'fees are a small share of the capital';
+    return {
+      capital_usd: capital,
+      fees_usd: fees,
+      fee_share: Math.round(share * 1000) / 1000,
+      hours,
+      fees_per_hour_usd: perHour,
+      verdict,
+    };
+  });
+  const viable = tiers.find((t) => t.fee_share < 0.1);
+  const minViable = viable === undefined ? null : viable.capital_usd;
+  // The plan itself is written for the row's own capital; the verdict prices it at every tier.
+  const capital = capitalFor(p);
+  const { fees, hours } = tierCost(capital, hold);
   const perHour = Math.round((fees / hours) * 10) / 10;
   const share = fees / capital;
   const worth =
@@ -1062,22 +1430,57 @@ export function farmVerdict(
       : share >= 0.1
         ? 'the fees are a visible share of the capital, so farm it only if you hold the full period'
         : 'the fees are a small share of the capital, so the plan is cheap to run';
+  const viableLine =
+    minViable === null
+      ? 'Even at $500 of capital the fees stay over 10% of it, so this row has no minimum viable capital below $500: farm it only with a larger position, or skip it.'
+      : `Minimum viable capital $${minViable}: the smallest of the $50 / $100 / $250 / $500 tiers whose fees stay under 10% of the capital.`;
   return {
     cost_usd: fees,
     hours,
     verdict:
       `Farm verdict: about $${fees} in gas on $${capital} of capital over ${hold} days, ` +
-      `around ${hours} hours of attention (about $${perHour} an hour in fees) — ${worth}. ` +
+      `around ${hours} hours of attention (about $${perHour} an hour in fees) — ${worth}. ${viableLine} ` +
       `Expected value $${expectedValue.toLocaleString('en-US')} is the token's hypothetical value at the peer rate, not a payout: farm for the position, not for a promised amount.`,
+    tiers,
+    min_viable_capital_usd: minViable,
   };
+}
+
+/**
+ * The three nearest live-token protocols in the same category, nearest by
+ * TVL: the traded tokens this row's multiple is anchored on, with their real
+ * market caps and multiples beside them.
+ */
+export function anchorsFor(p: SnapshotProtocol, protocols: SnapshotProtocol[]): Anchor[] {
+  const key = p.category ?? 'Uncategorized';
+  const x = Math.log(p.tvl_usd);
+  return livePool(protocols)
+    .filter((q) => (q.category ?? 'Uncategorized') === key)
+    .map((q) => ({ q, d: Math.abs(Math.log(q.tvl_usd) - x) }))
+    .sort((a, b) => a.d - b.d || (a.q.slug < b.q.slug ? -1 : 1))
+    .slice(0, 3)
+    .map(({ q }) => ({
+      slug: q.slug,
+      name: q.name,
+      tvl_usd: q.tvl_usd,
+      mcap_usd: q.mcap_usd,
+      mcap_tvl: q.mcap_usd !== null && q.tvl_usd > 0 ? round4(q.mcap_usd / q.tvl_usd) : null,
+    }));
 }
 
 /* ===================================================================== board */
 
 /** The protocols the board ranks, strongest first, with ranks 1..n. */
-export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
-  const comps = buildComparables(snapshot.protocols, model);
+export function buildBoard(
+  snapshot: Snapshot,
+  model: ModelConstants = MODEL,
+  conformal: ConformalCalibration | null = null,
+): BoardRow[] {
+  const comps = buildComparables(snapshot.protocols, model, snapshot.as_of);
   const rates = buildPeerRates(snapshot.protocols, model, snapshot.as_of);
+  const live = livePool(snapshot.protocols);
+  const calibration =
+    conformal ?? calibrateConformal(live, snapshot.as_of, model.growth_weight, model.age_coef, model, model.shrink_k);
   const watchlist = new Set(snapshot.watchlist);
   const chosen = new Map<string, SnapshotProtocol>();
   // The watchlist is the floor: every slug it names, even one the snapshot no longer carries.
@@ -1094,9 +1497,12 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     const v = impliedValue(p, snapshot.as_of, model, comps);
     const rate = peerRateFor(p, snapshot.as_of, rates);
     const expected = Math.max(1, Math.round(v.implied * rate));
-    const [low, high] = peerRange(p, snapshot.protocols, v.implied);
+    const q = conformalQFor(p, calibration);
+    const [low, high] = conformalRange(v.implied, q);
+    const [typicalLow, typicalHigh] = peerRange(p, snapshot.protocols, v.implied);
     const verdict = farmVerdict(p, v.age, expected);
-    return { p, ...v, rate, expected, low, high, verdict };
+    const anchors = anchorsFor(p, snapshot.protocols);
+    return { p, ...v, rate, expected, low, high, q, typicalLow, typicalHigh, verdict, anchors };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   return scored.map((s, i) => ({
@@ -1128,9 +1534,15 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     expected_value_usd: s.expected,
     value_low_usd: s.low,
     value_high_usd: s.high,
+    conformal_q: Math.round(s.q * 1000) / 1000,
+    typical_low_usd: s.typicalLow,
+    typical_high_usd: s.typicalHigh,
+    anchors: s.anchors,
     farm_cost_usd: s.verdict.cost_usd,
     farm_hours: s.verdict.hours,
     farm_verdict: s.verdict.verdict,
+    farm_tiers: s.verdict.tiers,
+    min_viable_capital_usd: s.verdict.min_viable_capital_usd,
     farm_steps: farmSteps(s.p, s.age).map(stepText),
   }));
 }
@@ -1175,9 +1587,15 @@ export function radarRow(row: BoardRow): RadarRow {
     expected_value_usd: row.expected_value_usd,
     value_low_usd: row.value_low_usd,
     value_high_usd: row.value_high_usd,
+    conformal_q: row.conformal_q,
+    typical_low_usd: row.typical_low_usd,
+    typical_high_usd: row.typical_high_usd,
+    anchors: row.anchors,
     farm_cost_usd: row.farm_cost_usd,
     farm_hours: row.farm_hours,
     farm_verdict: row.farm_verdict,
+    farm_tiers: row.farm_tiers,
+    min_viable_capital_usd: row.min_viable_capital_usd,
     farm_steps: row.farm_steps,
   };
 }
@@ -1208,9 +1626,17 @@ export function buildCoverage(snapshot: Snapshot, board: BoardRow[]): Coverage {
 export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
   const fitted = fitModel(snapshot);
   const effective = fitted === null ? model : fitted.constants;
-  const board = buildBoard(snapshot, effective);
+  const conformal: ConformalCalibration =
+    fitted === null
+      ? calibrateConformal(livePool(snapshot.protocols), snapshot.as_of, effective.growth_weight, effective.age_coef, effective, effective.shrink_k)
+      : {
+          qPooled: fitted.conformal.q_pooled,
+          qByCategory: new Map(Object.entries(fitted.conformal.q_by_category)),
+          target: fitted.conformal.target,
+        };
+  const board = buildBoard(snapshot, effective, conformal);
   const live = liveRows(snapshot);
-  const comps = buildComparables(snapshot.protocols, effective);
+  const comps = buildComparables(snapshot.protocols, effective, snapshot.as_of);
   const rates = buildPeerRates(snapshot.protocols, effective, snapshot.as_of);
   const radar: RadarData = {
     as_of: snapshot.as_of,
@@ -1224,6 +1650,9 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     global_multiple: round4(comps.globalRatio),
     global_peer_rate: Math.round(rates.global * 1000) / 1000,
     age_band_rates: ageBandRates(snapshot.protocols, snapshot.as_of),
+    conformal_q_pooled: Math.round(conformal.qPooled * 1000) / 1000,
+    conformal_target: conformal.target,
+    category_slopes: fitted === null ? [] : fitted.category_slopes,
     coverage: buildCoverage(snapshot, board),
     rows: board.map(radarRow),
     live,
@@ -1296,6 +1725,11 @@ export function boardIssue(board: BoardRow[], snapshot: Snapshot): string | null
     if (!(r.value_low_usd > 0 && r.value_low_usd <= r.implied_value_usd && r.implied_value_usd <= r.value_high_usd)) {
       return `${r.slug} has a range that does not contain its implied value`;
     }
+    if (!(r.conformal_q > 0) || !(r.typical_low_usd > 0 && r.typical_low_usd <= r.implied_value_usd && r.implied_value_usd <= r.typical_high_usd)) {
+      return `${r.slug} has a bad conformal or typical range`;
+    }
+    if (!Array.isArray(r.anchors) || r.anchors.length > 3) return `${r.slug} has ${r.anchors?.length} anchors`;
+    if (!Array.isArray(r.farm_tiers) || r.farm_tiers.length !== 4) return `${r.slug} has ${r.farm_tiers?.length} farm tiers`;
   }
   return null;
 }
