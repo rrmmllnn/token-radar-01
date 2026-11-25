@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Token Radar — pre-token protocols ranked by implied value</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <div class="mark" aria-hidden="true">◉</div>
+    <div>
+      <h1>Token Radar</h1>
+      <p class="sub">Every protocol that records no token, ranked by what its token would be worth.</p>
+    </div>
+  </div>
+  <dl class="stats" id="stats"></dl>
+</header>
+
+<nav class="tabs" aria-label="Views">
+  <button type="button" data-view="board" class="active" aria-current="page">Board</button>
+  <button type="button" data-view="live">Already trading</button>
+  <button type="button" data-view="model">How the value is computed</button>
+</nav>
+
+<main>
+  <section id="view-board" class="view">
+    <div class="controls" role="search">
+      <label>Search <input id="q" type="search" placeholder="Protocol name or slug…" autocomplete="off"></label>
+      <label>Category <select id="category"><option value="">All categories</option></select></label>
+      <label>Chain <select id="chain"><option value="">All chains</option></select></label>
+      <label>Min TVL <select id="minTvl">
+        <option value="0">Any TVL</option>
+        <option value="5000000">$5M+</option>
+        <option value="50000000">$50M+</option>
+        <option value="100000000">$100M+</option>
+        <option value="500000000">$500M+</option>
+      </select></label>
+      <label class="check"><input id="watchlistOnly" type="checkbox"> Watchlist only</label>
+      <label>Sort <select id="sort">
+        <option value="implied">Implied value ↓</option>
+        <option value="tvl">TVL ↓</option>
+        <option value="growth">7-day growth ↓</option>
+        <option value="age">Age ↓</option>
+        <option value="name">Name A–Z</option>
+      </select></label>
+    </div>
+    <p class="count" id="count" aria-live="polite"></p>
+    <div class="tablewrap">
+      <table id="board">
+        <thead><tr>
+          <th data-sort="rank" scope="col">#</th>
+          <th data-sort="name" scope="col">Protocol</th>
+          <th data-sort="category" scope="col">Category</th>
+          <th scope="col">Chains</th>
+          <th data-sort="tvl" scope="col">TVL</th>
+          <th data-sort="growth" scope="col">7d</th>
+          <th data-sort="age" scope="col">Age</th>
+          <th data-sort="implied" scope="col">Implied value</th>
+        </tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <p class="hint">Click a row for its detail view: the value breakdown, the comparables behind it, and the farm plan. ★ marks the 40 protocols on the snapshot’s watchlist.</p>
+  </section>
+
+  <section id="view-detail" class="view" hidden>
+    <p><button type="button" class="back" id="backToBoard">← Back to the board</button></p>
+    <article id="detail"></article>
+  </section>
+
+  <section id="view-live" class="view" hidden>
+    <h2>Already trading — the market’s own values</h2>
+    <p class="lede">These protocols already have a token that trades, so the board never ranks them by a model. They are here as the comparables: their market cap divided by their TVL is the multiple each pre-token protocol is priced from. The 24 largest by market cap are shown.</p>
+    <div class="tablewrap">
+      <table id="liveTable">
+        <thead><tr>
+          <th scope="col">Protocol</th><th scope="col">Category</th><th scope="col">Chains</th>
+          <th scope="col">TVL</th><th scope="col">Market cap</th><th scope="col">Mcap / TVL</th>
+        </tr></thead>
+        <tbody id="liveRows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="view-model" class="view" hidden>
+    <h2>How the value is computed</h2>
+    <div class="modelcard" id="modelCard"></div>
+  </section>
+</main>
+
+<footer>
+  <p>Implied value is this entry’s own claim, never make.fun’s: what a token would be worth if the protocol’s record stayed as it is. It does not predict whether or when a token is issued. “Records no token” means the DefiLlama record carries no market cap, CoinGecko id or symbol — a record, never proof a protocol has no token.</p>
+  <p id="source"></p>
+</footer>
+<script src="../data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
