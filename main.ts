@@ -1,7 +1,7 @@
 // Token Radar — the entrypoint (Node 22, standard library only).
 //
 // The program reads the sealed snapshot from /input/snapshot.json (or --input
-// <file|dir>), scores every pre-token protocol with the size-adjusted
+// <file|dir>), scores every pre-token protocol with the conformal
 // comparables model in lib/model.ts, writes the ranked board to
 // /output/board.json, and copies this repository's dashboard/ and screenshots/
 // to /output. Last, it writes /output/dossier.json, the summary the judge
@@ -98,8 +98,9 @@ const fit = radar.fit;
 if (fit !== null) {
   const m = radar.model;
   const v = fit.validation;
+  const b = v.baseline_loo;
   const lines = [
-    `token radar: model ${radar.model_version}: log(mcap) = ${m.intercept.toFixed(3)} + ${m.slope.toFixed(3)}*log(TVL), shrink k=${m.shrink_k}, growth weight ${m.growth_weight} (${v.growth_kept ? 'kept' : 'dropped'}), age coef ${m.age_coef} (${v.age_kept ? 'kept' : 'dropped'})`,
+    `token radar: model ${radar.model_version}: log(mcap) = ${m.intercept.toFixed(3)} + ${m.slope.toFixed(3)}*log(TVL) + ${m.chains_coef.toFixed(3)}*log(1+chains), shrink k=${m.shrink_k}, slope shrink k=${m.slope_shrink_k}, growth weight ${m.growth_weight} (${v.growth_kept ? 'kept' : 'dropped'}), age coef ${m.age_coef} (${v.age_kept ? 'kept' : 'dropped'})`,
     `token radar: live pool ${fit.live_pool_size} protocols, train median log error ${fit.train_log_error.toFixed(3)}`,
   ];
   for (const method of v.methods) {
@@ -109,9 +110,11 @@ if (fit !== null) {
   }
   lines.push(
     `token radar: held-out mean log error keep-both ${v.log_error_keep_both.toFixed(3)}, drop-growth ${v.log_error_drop_growth.toFixed(3)}, drop-age ${v.log_error_drop_age.toFixed(3)}, drop-both ${v.log_error_drop_both.toFixed(3)}`,
-    `token radar: peer-range held-out coverage ${(fit.range_coverage * 100).toFixed(1)}% (middle-half range)`,
+    `token radar: LOO baseline mean log error model ${b.model_mean_log_error.toFixed(3)}, naive median multiple ${b.naive_median_mean_log_error.toFixed(3)} (${b.ratio_vs_median_multiple.toFixed(2)}x), pricing at TVL ${b.naive_tvl_mean_log_error.toFixed(3)} (${b.ratio_vs_tvl.toFixed(2)}x)`,
+    `token radar: conformal 80% range held-out coverage ${(fit.range_coverage * 100).toFixed(1)}%, mean log-width ${fit.range_width_log.toFixed(2)}, pooled q ${fit.conformal.q_pooled.toFixed(3)}`,
+    `token radar: category slopes: ${fit.category_slopes.map((c) => `${c.category} ${c.slope.toFixed(3)} (n=${c.live_peers})`).join(', ')}`,
     `token radar: coverage ${radar.coverage.board} board + ${radar.coverage.live} live + ${radar.coverage.excluded} excluded = ${radar.coverage.total} protocols`,
-    `token radar: top row ${board[0]!.slug} implied $${board[0]!.implied_value_usd.toLocaleString('en-US')}, expected $${board[0]!.expected_value_usd.toLocaleString('en-US')}`,
+    `token radar: top row ${board[0]!.slug} implied $${board[0]!.implied_value_usd.toLocaleString('en-US')}, expected $${board[0]!.expected_value_usd.toLocaleString('en-US')}, range $${board[0]!.value_low_usd.toLocaleString('en-US')}–$${board[0]!.value_high_usd.toLocaleString('en-US')}`,
   );
   process.stdout.write(`${lines.join('\n')}\n`);
 }
