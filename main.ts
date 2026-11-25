@@ -1,11 +1,13 @@
 // Token Radar — the entrypoint (Node 22, standard library only).
 //
 // The program reads the sealed snapshot from /input/snapshot.json (or --input
-// <file|dir>), scores every pre-token protocol with the comparables model in
-// lib/model.ts, writes the ranked board to /output/board.json, and copies this
-// repository's dashboard/ and screenshots/ to /output. Last, it writes
-// /output/dossier.json, the summary the judge reads, with the vendored make.fun
-// library (vendor/makefun-board.ts, from the kit).
+// <file|dir>), scores every pre-token protocol with the size-adjusted
+// comparables model in lib/model.ts, writes the ranked board to
+// /output/board.json, and copies this repository's dashboard/ and screenshots/
+// to /output. Last, it writes /output/dossier.json, the summary the judge
+// reads, with the vendored make.fun library (vendor/makefun-board.ts, from
+// the kit). It also prints the fitted model and its held-out validation, so a
+// run's numbers can be checked without opening the dashboard.
 //
 // The dashboard is a static page, no framework and no network:
 // dashboard/index.html, dashboard/app.css and dashboard/app.js read
@@ -90,3 +92,26 @@ process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.board_size - radar.watchlist_size} early, ${radar.live_size} live set aside)\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (${dashFiles.length} files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
+
+/** The fitted model and its held-out validation, for the run log. */
+const fit = radar.fit;
+if (fit !== null) {
+  const m = radar.model;
+  const v = fit.validation;
+  const lines = [
+    `token radar: model ${radar.model_version}: log(mcap) = ${m.intercept.toFixed(3)} + ${m.slope.toFixed(3)}*log(TVL), shrink k=${m.shrink_k}, growth weight ${m.growth_weight} (${v.growth_kept ? 'kept' : 'dropped'}), age coef ${m.age_coef} (${v.age_kept ? 'kept' : 'dropped'})`,
+    `token radar: live pool ${fit.live_pool_size} protocols, train median log error ${fit.train_log_error.toFixed(3)}`,
+  ];
+  for (const method of v.methods) {
+    lines.push(
+      `token radar: held-out ${method.name}: MAPE ${(method.mape * 100).toFixed(1)}%, median log error ${method.log_error.toFixed(3)}, mean log error ${method.mean_log_error.toFixed(3)}`,
+    );
+  }
+  lines.push(
+    `token radar: held-out mean log error keep-both ${v.log_error_keep_both.toFixed(3)}, drop-growth ${v.log_error_drop_growth.toFixed(3)}, drop-age ${v.log_error_drop_age.toFixed(3)}, drop-both ${v.log_error_drop_both.toFixed(3)}`,
+    `token radar: peer-range held-out coverage ${(fit.range_coverage * 100).toFixed(1)}% (middle-half range)`,
+    `token radar: coverage ${radar.coverage.board} board + ${radar.coverage.live} live + ${radar.coverage.excluded} excluded = ${radar.coverage.total} protocols`,
+    `token radar: top row ${board[0]!.slug} implied $${board[0]!.implied_value_usd.toLocaleString('en-US')}, expected $${board[0]!.expected_value_usd.toLocaleString('en-US')}`,
+  );
+  process.stdout.write(`${lines.join('\n')}\n`);
+}
