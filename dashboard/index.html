@@ -12,7 +12,7 @@
     <div class="mark" aria-hidden="true">◉</div>
     <div>
       <h1>Token Radar</h1>
-      <p class="sub">Every protocol that records no token, ranked by what its token would be worth — with the peer rate behind each one and the expected value beside it.</p>
+      <p class="sub">Every protocol that records no token, ranked by what its token would be worth — with the peer rate behind each one, the expected value beside it, and an honest 80% range around every value.</p>
     </div>
   </div>
   <dl class="stats" id="stats"></dl>
@@ -68,12 +68,12 @@
           <th data-sort="peer" scope="col">Peer rate</th>
           <th data-sort="implied" scope="col">Implied value</th>
           <th data-sort="expected" scope="col">Expected value</th>
-          <th scope="col">Value range</th>
+          <th scope="col">Value range (80%)</th>
         </tr></thead>
         <tbody id="rows"></tbody>
       </table>
     </div>
-    <p class="hint">Click a row for its detail view: the value breakdown, the peer rate behind it, the value range, and the farm plan with its verdict. ★ marks the 40 protocols on the snapshot’s watchlist. Peer rate is the share of protocols with the same category and age that record a token; expected value is implied value × peer rate.</p>
+    <p class="hint">Click a row for its detail view: the value breakdown, the traded anchors behind its multiple, the peer rate behind it, the 80% value range and the typical range, and the farm plan with its verdict priced at four capital tiers. ★ marks the 40 protocols on the snapshot’s watchlist. Peer rate is the share of protocols with the same category and age that record a token; expected value is implied value × peer rate. The 80% range is calibrated so four of five live protocols’ real market caps fall inside their own range — wide, and honest about it.</p>
   </section>
 
   <section id="view-detail" class="view" hidden>
